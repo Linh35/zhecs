@@ -172,6 +172,18 @@ const QueryCache = struct {
     matched: std.ArrayList(u32) = .empty,
 };
 
+// A structural change recorded while a defer scope is open, replayed when the scope closes. Adds
+// and removes (relationship pairs included) and deletes reduce to these kinds; a `set` also stashes
+// the component bytes in the world's `cmd_data` buffer at [off, off + len).
+const CmdKind = enum { add, set, remove, delete };
+const Command = struct {
+    entity: Entity,
+    kind: CmdKind,
+    id: Id,
+    off: u32 = 0,
+    len: u32 = 0,
+};
+
 const SigContext = struct {
     pub fn hash(_: SigContext, key: []const Id) u64 {
         return std.hash.Wyhash.hash(0, std.mem.sliceAsBytes(key));
@@ -201,6 +213,11 @@ pub const World = struct {
     // Bumped whenever a new archetype is created, so cached queries know to refresh.
     archetype_version: u64 = 0,
     query_cache: QueryMap = .empty,
+    // Deferral: while `defer_depth` is above zero, structural changes are recorded in `cmd_list`
+    // (with `set` payloads in `cmd_data`) and replayed when the outermost scope closes.
+    defer_depth: u32 = 0,
+    cmd_list: std.ArrayList(Command) = .empty,
+    cmd_data: std.ArrayList(u8) = .empty,
 
     pub fn init(gpa: Allocator) !World {
         return initCapacity(gpa, .{});
@@ -252,17 +269,14 @@ pub const World = struct {
     }
 
     /// Delete an entity and all of its components. Its handle becomes stale (a later `isAlive`
-    /// returns false even if the slot is reused, thanks to the generation bump).
+    /// returns false even if the slot is reused, thanks to the generation bump). Inside a defer
+    /// scope the delete is recorded and applied when the scope closes.
     pub fn delete(self: *World, e: Entity) void {
-        const rec = self.recordPtr(e) orelse return;
-        const arch_index = rec.archetype;
-        const row = rec.row;
-        rec.alive = false;
-        rec.generation +%= 1;
-        const moved = self.archetypes.items[arch_index].swapRemoveRow(row);
-        if (moved != .none) self.recordPtr(moved).?.row = row;
-        // Best effort: if recycling the id fails to allocate, the slot simply is not reused.
-        self.free_ids.append(self.mem(), entityIndex(e)) catch {};
+        if (self.defer_depth > 0) {
+            self.cmd_list.append(self.mem(), .{ .entity = e, .kind = .delete, .id = 0 }) catch {};
+            return;
+        }
+        self.applyDelete(e);
     }
 
     pub fn isAlive(self: *World, e: Entity) bool {
@@ -274,29 +288,19 @@ pub const World = struct {
     /// Add component `T` to `e` with a zeroed value, if it is not already present.
     pub fn add(self: *World, e: Entity, comptime T: type) !void {
         const id = try self.componentId(T);
-        const had = self.has(e, T);
-        try self.addId(e, id);
-        if (!had) self.fireHook(id, e, .on_add);
+        if (self.defer_depth > 0) return self.enqueue(.add, e, id);
+        try self.applyAdd(e, id);
     }
 
     /// Add or overwrite component `value` on `e`. Fires on_add (if newly added) then on_set.
     pub fn set(self: *World, e: Entity, value: anytype) !void {
-        const T = @TypeOf(value);
-        const id = try self.componentId(T);
-        const had = self.has(e, T);
-        try self.addId(e, id);
-        if (@sizeOf(T) > 0) {
-            const rec = self.recordPtr(e).?;
-            const arch = &self.archetypes.items[rec.archetype];
-            const ci = arch.columnIndex(id).?;
-            const s = @sizeOf(T);
-            @memcpy(arch.columns[ci].data.items[rec.row * s ..][0..s], std.mem.asBytes(&value));
-        }
-        if (!had) self.fireHook(id, e, .on_add);
-        self.fireHook(id, e, .on_set);
+        const id = try self.componentId(@TypeOf(value));
+        if (self.defer_depth > 0) return self.enqueueSet(e, id, std.mem.asBytes(&value));
+        try self.applySet(e, id, std.mem.asBytes(&value));
     }
 
-    /// Read-only pointer to `e`'s component `T`, or null if it does not have one.
+    /// Read-only pointer to `e`'s component `T`, or null if it does not have one. Reads always see
+    /// committed state; a value queued by `set` inside a defer scope is not visible until it flushes.
     pub fn get(self: *World, e: Entity, comptime T: type) ?*const T {
         return self.getMut(e, T);
     }
@@ -312,16 +316,32 @@ pub const World = struct {
 
     pub fn has(self: *World, e: Entity, comptime T: type) bool {
         const id = self.lookupComponent(T) orelse return false;
-        const rec = self.recordPtr(e) orelse return false;
-        return self.archetypes.items[rec.archetype].columnIndex(id) != null;
+        return self.hasId(e, id);
     }
 
     /// Remove component `T` from `e`, if present. Fires on_remove.
     pub fn remove(self: *World, e: Entity, comptime T: type) !void {
         const id = self.lookupComponent(T) orelse return;
-        if (!self.has(e, T)) return;
-        try self.removeId(e, id);
-        self.fireHook(id, e, .on_remove);
+        if (self.defer_depth > 0) return self.enqueue(.remove, e, id);
+        try self.applyRemove(e, id);
+    }
+
+    // --- deferral --------------------------------------------------------------------------------
+
+    /// Open a defer scope. While one is open, `add`, `set`, `remove`, `addPair`, `removePair`, and
+    /// `delete` record their change instead of applying it, so you can call them safely while a
+    /// query is iterating. Scopes nest; the recorded changes are applied when the outermost closes.
+    /// Reads (`get`, `has`, `count`) still see committed state until then.
+    pub fn beginDefer(self: *World) void {
+        self.defer_depth += 1;
+    }
+
+    /// Close a defer scope. When the outermost scope closes, the recorded changes are applied in the
+    /// order they were made. Changes to an entity that an earlier change deleted are skipped.
+    pub fn endDefer(self: *World) !void {
+        std.debug.assert(self.defer_depth > 0);
+        self.defer_depth -= 1;
+        if (self.defer_depth == 0) try self.flush();
     }
 
     // --- singletons ------------------------------------------------------------------------------
@@ -337,10 +357,14 @@ pub const World = struct {
 
     /// Add the relationship `(Relation, target)` to `e`, for example `(ChildOf, parent)`.
     pub fn addPair(self: *World, e: Entity, comptime Relation: type, target: Entity) !void {
-        try self.addId(e, try self.pairId(Relation, target));
+        const id = try self.pairId(Relation, target);
+        if (self.defer_depth > 0) return self.enqueue(.add, e, id);
+        try self.applyAdd(e, id);
     }
     pub fn removePair(self: *World, e: Entity, comptime Relation: type, target: Entity) !void {
-        try self.removeId(e, try self.pairId(Relation, target));
+        const id = try self.pairId(Relation, target);
+        if (self.defer_depth > 0) return self.enqueue(.remove, e, id);
+        try self.applyRemove(e, id);
     }
     pub fn hasPair(self: *World, e: Entity, comptime Relation: type, target: Entity) bool {
         const rel = self.lookupComponent(Relation) orelse return false;
@@ -436,6 +460,16 @@ pub const World = struct {
         for (matched) |ai| visitor(&self.archetypes.items[ai], terms, ids, ctx, func);
     }
 
+    /// Compile a reusable query handle. Calling its `each`, `run`, or `count` skips the per-call key
+    /// hashing the loose `each`/`run`/`count` do, which adds up when you run many queries a frame.
+    /// The handle stays valid for the life of the world and refreshes itself when tables appear.
+    pub fn query(self: *World, comptime terms: anytype) !Query(terms) {
+        const n = terms.len;
+        var ids: [n]Id = undefined;
+        inline for (terms, 0..) |T, i| ids[i] = try self.componentId(T);
+        return .{ .world = self, .ids = ids, .cache = try self.resolveQuery(ids) };
+    }
+
     // --- systems / pipeline ----------------------------------------------------------------------
 
     /// Register a system that runs in `phase`. `func` has the same shape as an `each` callback but
@@ -451,16 +485,33 @@ pub const World = struct {
     }
 
     /// Advance the world by `dt` seconds: run every system, phase by phase, in declaration order.
-    pub fn progress(self: *World, dt: f32) void {
+    ///
+    /// The whole pass runs inside a defer scope, so systems may add, remove, and delete freely; the
+    /// recorded changes are applied once the pass finishes. Systems share data within a frame
+    /// through component values, which they edit in place through the pointers a query hands them.
+    pub fn progress(self: *World, dt: f32) !void {
         self.delta_time = dt;
+        self.beginDefer();
         for (std.enums.values(Phase)) |ph| {
             for (self.systems.items) |s| {
                 if (s.phase == ph) s.run(self);
             }
         }
+        try self.endDefer();
     }
 
     // --- pre-allocation --------------------------------------------------------------------------
+
+    /// Create `n` entities at once, writing their handles into `out` (which must have room for them).
+    /// The new entities carry no components. This grows the entity tables once rather than per
+    /// entity, so it is the cheap way to bring a crowd into being before giving them their parts.
+    pub fn spawn(self: *World, n: usize, out: []Entity) !void {
+        std.debug.assert(out.len >= n);
+        try self.records.ensureUnusedCapacity(self.mem(), n);
+        try self.archetypes.items[0].entities.ensureUnusedCapacity(self.mem(), n);
+        var i: usize = 0;
+        while (i < n) : (i += 1) out[i] = try self.entity();
+    }
 
     /// Ensure the archetype that has exactly `terms` exists and can hold `n` entities without
     /// reallocating. A pure optimization for known workloads; correctness does not depend on it.
@@ -487,6 +538,79 @@ pub const World = struct {
         return r;
     }
 
+    fn hasId(self: *World, e: Entity, id: Id) bool {
+        const rec = self.recordPtr(e) orelse return false;
+        return self.archetypes.items[rec.archetype].columnIndex(id) != null;
+    }
+
+    // The immediate forms of the public operations. The public methods call these when no defer
+    // scope is open, and `flush` calls them when replaying a scope's recorded changes.
+
+    fn applyAdd(self: *World, e: Entity, id: Id) !void {
+        const had = self.hasId(e, id);
+        try self.addId(e, id);
+        if (!had) self.fireHook(id, e, .on_add);
+    }
+
+    fn applySet(self: *World, e: Entity, id: Id, bytes: []const u8) !void {
+        const had = self.hasId(e, id);
+        try self.addId(e, id);
+        if (bytes.len > 0) {
+            const rec = self.recordPtr(e).?;
+            const arch = &self.archetypes.items[rec.archetype];
+            const ci = arch.columnIndex(id).?;
+            @memcpy(arch.columns[ci].data.items[rec.row * bytes.len ..][0..bytes.len], bytes);
+        }
+        if (!had) self.fireHook(id, e, .on_add);
+        self.fireHook(id, e, .on_set);
+    }
+
+    fn applyRemove(self: *World, e: Entity, id: Id) !void {
+        if (!self.hasId(e, id)) return;
+        try self.removeId(e, id);
+        self.fireHook(id, e, .on_remove);
+    }
+
+    fn applyDelete(self: *World, e: Entity) void {
+        const rec = self.recordPtr(e) orelse return;
+        const arch_index = rec.archetype;
+        const row = rec.row;
+        rec.alive = false;
+        rec.generation +%= 1;
+        const moved = self.archetypes.items[arch_index].swapRemoveRow(row);
+        if (moved != .none) self.recordPtr(moved).?.row = row;
+        // Best effort: if recycling the id fails to allocate, the slot simply is not reused.
+        self.free_ids.append(self.mem(), entityIndex(e)) catch {};
+    }
+
+    fn enqueue(self: *World, kind: CmdKind, e: Entity, id: Id) !void {
+        try self.cmd_list.append(self.mem(), .{ .entity = e, .kind = kind, .id = id });
+    }
+
+    fn enqueueSet(self: *World, e: Entity, id: Id, bytes: []const u8) !void {
+        const off: u32 = @intCast(self.cmd_data.items.len);
+        try self.cmd_data.appendSlice(self.mem(), bytes);
+        try self.cmd_list.append(self.mem(), .{ .entity = e, .kind = .set, .id = id, .off = off, .len = @intCast(bytes.len) });
+    }
+
+    // Replay the recorded changes in order, then reset the buffers (keeping their capacity). A
+    // change aimed at an entity that an earlier change already deleted is skipped, not an error.
+    fn flush(self: *World) !void {
+        const n = self.cmd_list.items.len;
+        var i: usize = 0;
+        while (i < n) : (i += 1) {
+            const cmd = self.cmd_list.items[i];
+            switch (cmd.kind) {
+                .add => self.applyAdd(cmd.entity, cmd.id) catch |err| if (err != error.EntityNotAlive) return err,
+                .set => self.applySet(cmd.entity, cmd.id, self.cmd_data.items[cmd.off..][0..cmd.len]) catch |err| if (err != error.EntityNotAlive) return err,
+                .remove => self.applyRemove(cmd.entity, cmd.id) catch |err| if (err != error.EntityNotAlive) return err,
+                .delete => self.applyDelete(cmd.entity),
+            }
+        }
+        self.cmd_list.clearRetainingCapacity();
+        self.cmd_data.clearRetainingCapacity();
+    }
+
     fn componentId(self: *World, comptime T: type) !Id {
         comptime if (@alignOf(T) > MAX_ALIGN) @compileError("component '" ++ @typeName(T) ++ "' needs alignment > " ++ std.fmt.comptimePrint("{d}", .{MAX_ALIGN}) ++ "; raise MAX_ALIGN in zhecs");
         const gop = try self.component_ids.getOrPut(self.mem(), typeKey(T));
@@ -509,25 +633,31 @@ pub const World = struct {
 
     // Return the archetype indices matching the given term ids, cached across calls. On a cache hit
     // with an unchanged archetype version this does not allocate: it sorts the tiny term array on
-    // the stack to form the key and looks it up.
+    // the stack to form the key and looks it up. A held `Query` skips even this by keeping the cache
+    // pointer from `resolveQuery` and calling `ensureFresh` directly.
     fn matchedArchetypes(self: *World, term_ids: anytype) ![]const u32 {
-        var key = term_ids; // copy; sorting canonicalizes so term order does not fork the cache
-        std.mem.sort(Id, &key, {}, std.sort.asc(Id));
-
-        if (self.query_cache.getContext(&key, .{})) |qc| {
-            if (qc.version != self.archetype_version) try self.refreshQuery(qc, term_ids);
-            return qc.matched.items;
-        }
-
-        const owned = try self.mem().dupe(Id, &key);
-        const qc = try self.mem().create(QueryCache);
-        qc.* = .{ .version = self.archetype_version -% 1, .matched = .empty }; // mismatch forces refresh
-        try self.query_cache.putContext(self.mem(), owned, qc, .{});
-        try self.refreshQuery(qc, term_ids);
+        const qc = try self.resolveQuery(term_ids);
+        try self.ensureFresh(qc, term_ids);
         return qc.matched.items;
     }
 
-    fn refreshQuery(self: *World, qc: *QueryCache, term_ids: anytype) !void {
+    // Find or create the cache slot for a set of term ids, keyed by their sorted form.
+    fn resolveQuery(self: *World, term_ids: anytype) !*QueryCache {
+        var key = term_ids; // copy; sorting canonicalizes so term order does not fork the cache
+        std.mem.sort(Id, &key, {}, std.sort.asc(Id));
+
+        if (self.query_cache.getContext(&key, .{})) |qc| return qc;
+
+        const owned = try self.mem().dupe(Id, &key);
+        const qc = try self.mem().create(QueryCache);
+        qc.* = .{ .version = self.archetype_version -% 1, .matched = .empty }; // mismatch forces a refresh
+        try self.query_cache.putContext(self.mem(), owned, qc, .{});
+        return qc;
+    }
+
+    // Rebuild a cache's match list only if a new archetype has appeared since it was last built.
+    fn ensureFresh(self: *World, qc: *QueryCache, term_ids: anytype) !void {
+        if (qc.version == self.archetype_version) return;
         qc.matched.clearRetainingCapacity();
         var ai: u32 = 0;
         while (ai < self.archetypes.items.len) : (ai += 1) {
@@ -648,6 +778,62 @@ pub const World = struct {
         rec.row = @intCast(new_row);
     }
 };
+
+/// A reusable query handle from `World.query`. It holds the resolved component ids and a pointer to
+/// the match cache, so each sweep is a quick freshness check and a walk of the matching tables. Its
+/// `each`, `run`, and `count` behave exactly like the same-named methods on the world.
+pub fn Query(comptime terms: anytype) type {
+    const n = terms.len;
+    return struct {
+        world: *World,
+        ids: [n]Id,
+        cache: *QueryCache,
+        const Self = @This();
+
+        pub fn each(self: Self, ctx: anytype, comptime func: anytype) void {
+            self.sweep(ctx, func, iterArchetype);
+        }
+
+        pub fn run(self: Self, ctx: anytype, comptime func: anytype) void {
+            self.sweep(ctx, func, runArchetype);
+        }
+
+        pub fn count(self: Self) usize {
+            const list = self.matched() orelse return self.scanCount();
+            var total: usize = 0;
+            for (list) |ai| total += self.world.archetypes.items[ai].entities.items.len;
+            return total;
+        }
+
+        // The cached match list, refreshed if a table has appeared, or null if the refresh could
+        // not allocate (the callers then fall back to a direct scan, which never allocates).
+        fn matched(self: Self) ?[]const u32 {
+            self.world.ensureFresh(self.cache, self.ids) catch return null;
+            return self.cache.matched.items;
+        }
+
+        inline fn sweep(self: Self, ctx: anytype, comptime func: anytype, comptime visitor: anytype) void {
+            if (self.matched()) |list| {
+                for (list) |ai| visitor(&self.world.archetypes.items[ai], terms, self.ids, ctx, func);
+            } else {
+                var ai: usize = 0;
+                while (ai < self.world.archetypes.items.len) : (ai += 1) {
+                    const arch = &self.world.archetypes.items[ai];
+                    if (archetypeMatches(arch, self.ids)) visitor(arch, terms, self.ids, ctx, func);
+                }
+            }
+        }
+
+        fn scanCount(self: Self) usize {
+            var total: usize = 0;
+            var ai: usize = 0;
+            while (ai < self.world.archetypes.items.len) : (ai += 1) {
+                if (archetypeMatches(&self.world.archetypes.items[ai], self.ids)) total += self.world.archetypes.items[ai].entities.items.len;
+            }
+            return total;
+        }
+    };
+}
 
 fn columnPtr(comptime T: type, col: *Column, row: usize) *T {
     if (@sizeOf(T) == 0) return @ptrFromInt(@alignOf(T)); // zero-size: a valid non-null pointer, deref is a no-op

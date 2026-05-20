@@ -60,7 +60,7 @@ fn walkthrough(gpa: std.mem.Allocator) !void {
     var frame: usize = 0;
     while (frame < 10) : (frame += 1) {
         world.getSingleton(Time).?.elapsed += 1.0 / 60.0;
-        world.progress(1.0 / 60.0);
+        try world.progress(1.0 / 60.0);
     }
 
     const pp = world.get(player, Position).?;
@@ -112,7 +112,7 @@ fn benchmark(gpa: std.mem.Allocator) !void {
 
     const each_start = nowNs();
     var frame: usize = 0;
-    while (frame < FRAMES) : (frame += 1) world.progress(1.0 / 60.0);
+    while (frame < FRAMES) : (frame += 1) try world.progress(1.0 / 60.0);
     const each_ns = nowNs() - each_start;
     report("each (per row)", each_ns, N * FRAMES);
 

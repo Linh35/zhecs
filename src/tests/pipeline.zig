@@ -46,7 +46,7 @@ test "systems run in phase order, then registration order within a phase" {
         }
     }.run);
 
-    w.progress(1.0);
+    try w.progress(1.0);
     try testing.expectEqualSlices(u8, &[_]u8{ 0, 1, 2, 3 }, Log.seq[0..Log.n]);
 }
 
@@ -65,8 +65,8 @@ test "a system reads delta_time and integrates" {
         }
     }.run);
 
-    w.progress(0.1);
-    w.progress(0.1);
+    try w.progress(0.1);
+    try w.progress(0.1);
     try testing.expectApproxEqAbs(@as(f32, 2.0), w.get(e, c.Position).?.x, 1e-5);
     try testing.expectApproxEqAbs(@as(f32, -0.8), w.get(e, c.Position).?.y, 1e-5);
 }

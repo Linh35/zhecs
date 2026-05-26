@@ -109,10 +109,47 @@ try world.system(.on_update, "move", .{ Position, Velocity }, struct {
     }
 }.run);
 
-world.progress(1.0 / 60.0);
+try world.progress(1.0 / 60.0);
 ```
 
-The phases are `on_load`, `post_load`, `pre_update`, `on_update`, `on_validate`, `post_update`, `pre_store`, and `on_store`, and they run in that sequence.
+The phases are `on_load`, `post_load`, `pre_update`, `on_update`, `on_validate`, `post_update`, `pre_store`, and `on_store`, and they run in that sequence. A whole `progress` pass runs inside a defer scope, described next, so a system may add, remove, and delete freely while it runs. Those changes take effect once the pass finishes. During a frame, systems speak to one another through component values, which they edit in place through the pointers a query hands them.
+
+### Reusable queries
+
+If you run the same query many times, compile it once into a handle. The handle keeps the resolved component ids and a pointer to its match cache, so each sweep skips the small amount of work the loose `each` does to find them. It refreshes itself when a new kind of table appears, and it stays valid for the life of the world.
+
+```zig
+const movers = try world.query(.{ Position, Velocity });
+// later, every frame
+movers.each(dt, moveFn);
+const n = movers.count();
+```
+
+### Spawning a crowd
+
+When you need many entities at once, `spawn` makes them in one go and grows the entity tables a single time rather than once per entity. The new entities arrive bare, ready to be given their parts.
+
+```zig
+var ids: [1000]zhecs.Entity = undefined;
+try world.spawn(ids.len, &ids);
+for (ids) |e| try world.set(e, Position{ .x = 0, .y = 0 });
+```
+
+## Changing the world while it iterates
+
+Adding a component to an entity moves it to another table, which would pull the ground from under a query that is walking that table. To make this safe, open a defer scope. While one is open, the structural calls (`add`, `set`, `remove`, `addPair`, `removePair`, `delete`) record what you asked for rather than doing it at once, and the recorded changes are applied in order when the outermost scope closes. Reads in the meantime see the world as it stands, so a value you queue with `set` is not visible until the scope closes. Observers fire when the change lands, not when you queue it.
+
+```zig
+world.beginDefer();
+world.each(.{ Health }, &world, struct {
+    fn run(w: *zhecs.World, e: zhecs.Entity, h: *Health) void {
+        if (h.hp <= 0) w.delete(e); // recorded, applied after the sweep
+    }
+}.run);
+try world.endDefer();
+```
+
+Systems do not need to do this themselves, since `progress` already runs them inside a scope.
 
 ### Relationships
 
@@ -175,15 +212,25 @@ toggled a tag on 1000000 entities (add and remove, two table moves each) in ~70 
 
 The per-row form is already close to memory bandwidth. The per-chunk form is faster again because the inner loop is plain Zig over contiguous slices, which the compiler vectorizes.
 
+## Working with other libraries
+
+A component is any Zig type, so the types a graphics, audio, or physics library hands you become components without a wrapper. A binding such as zig-raylib gives you vectors, colours, rectangles, matrices, texture handles, and sound handles, and each of those goes straight into the world.
+
+```zig
+const rl = @import("raylib");
+try world.set(player, rl.Vector2{ .x = 0, .y = 0 });
+try world.set(player, sprite); // rl.Texture2D, a handle into the graphics driver
+```
+
+A render pass is then a query, and a physics step is another. There is one thing to keep in mind. A component that owns a resource, a texture on the card or a buffer of audio, is held by its handle, and a table move copies that handle rather than the resource behind it. The world does not free it for you. When you remove such a component or delete its entity, unload the resource yourself, the same way you would if you held it in a plain struct. Component move and destroy hooks, which would automate this, are on the road ahead.
+
 ## What is not here yet
 
 The draft stops at a coherent core, and the edges are honest about it.
 
-Structural changes during iteration are not allowed. Do not add or remove a component, or delete an entity, from inside an `each` or a system, because those changes move rows under the iterator. Deferred commands are the planned answer and will lift this rule.
+Relationships are exclusive and carry no data of their own. There are no query operators yet, so you cannot ask for the absence of a component, an optional one, an alternative, or a wildcard target. A table move copies component bytes directly, which assumes plain data with no move or destroy logic, so resource-owning components are your responsibility to unload. Component alignment above sixteen bytes is rejected at compile time.
 
-Relationships are exclusive and carry no data of their own. There are no query operators yet, so you cannot ask for the absence of a component, an optional one, an alternative, or a wildcard target. A table move copies component bytes directly, which assumes plain data with no move or destroy logic. Component alignment above sixteen bytes is rejected at compile time.
-
-The road ahead, roughly in order: deferred commands, query operators and wildcard relationships, relationship data and traversal, prefabs and instancing, component move and destroy hooks, and a choice of storage backend.
+The road ahead, roughly in order: query operators and wildcard relationships, relationship data and traversal, prefabs and instancing, component move and destroy hooks, and a choice of storage backend.
 
 ## Layout
 

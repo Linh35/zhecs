@@ -224,6 +224,8 @@ try world.set(player, sprite); // rl.Texture2D, a handle into the graphics drive
 
 A render pass is then a query, and a physics step is another. There is one thing to keep in mind. A component that owns a resource, a texture on the card or a buffer of audio, is held by its handle, and a table move copies that handle rather than the resource behind it. The world does not free it for you. When you remove such a component or delete its entity, unload the resource yourself, the same way you would if you held it in a plain struct. Component move and destroy hooks, which would automate this, are on the road ahead.
 
+There is a working example under `examples/raylib`. It is a small project of its own, depending on [raylib-zig](https://github.com/raylib-zig/raylib-zig) and on this library, so that the core stays free of dependencies. `zig build run` inside that folder opens a window of entities bouncing around, driven by a zhecs system, and `zig build test` runs the integration checks without a display. One thing the example shows in passing: a position and a velocity are both a `Vector2`, and since a component is identified by its type, give each its own one-field wrapper. Types that play a single role, a colour or a texture, go in as they are.
+
 ## What is not here yet
 
 The draft stops at a coherent core, and the edges are honest about it.
@@ -241,4 +243,5 @@ src/zhecs.zig      the library and its internal tests
 src/tests.zig      pulls in the public test suite
 src/tests/         the suite, one file per topic
 examples/basic.zig a walkthrough and a benchmark
+examples/raylib/   a windowed raylib demo, its own small project
 ```

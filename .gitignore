@@ -5,3 +5,4 @@ zig-pkg/
 .DS_Store
 .claude/
 CLAUDE.md
+imgui.ini

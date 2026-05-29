@@ -1,0 +1,14 @@
+.{
+    .name = .zhecs_zgui_example,
+    .version = "0.0.0",
+    .fingerprint = 0xa918bb4dec28adb7,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zgui = .{
+            .url = "git+https://github.com/zig-gamedev/zgui#bfbebed372723d1f585f86fc0a550232b3427f4d",
+            .hash = "zgui-0.6.0-dev--L6sZJhIbgAjWdK5h6xuVUrsOcD-RdqEOEPf03Zgi4mF",
+        },
+        .zhecs = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

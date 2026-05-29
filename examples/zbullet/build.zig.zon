@@ -1,0 +1,14 @@
+.{
+    .name = .zhecs_zbullet_example,
+    .version = "0.0.0",
+    .fingerprint = 0xa5c574ef56a0bef,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zbullet = .{
+            .url = "git+https://github.com/zig-gamedev/zbullet#5b3f11bd2b442591b24eae01e3c025acd1815561",
+            .hash = "zbullet-0.4.0-dev-7gkXj4_AQADgCkyoBBFU6yRtV3jWiWgREIFl8LczUG52",
+        },
+        .zhecs = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

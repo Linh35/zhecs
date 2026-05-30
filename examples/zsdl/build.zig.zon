@@ -1,0 +1,14 @@
+.{
+    .name = .zhecs_zsdl_example,
+    .version = "0.0.0",
+    .fingerprint = 0x35cca39d136cca13,
+    .minimum_zig_version = "0.16.0",
+    .dependencies = .{
+        .zsdl = .{
+            .url = "git+https://github.com/zig-gamedev/zsdl#fa05b59b5e133141680077534e6c86d8c98f8dec",
+            .hash = "zsdl-0.4.0-dev-rFpjE6PoXwBMQ7CuE5QFp4l7iRuNc6e6YZNAMyOtbWOa",
+        },
+        .zhecs = .{ .path = "../.." },
+    },
+    .paths = .{ "build.zig", "build.zig.zon", "src" },
+}

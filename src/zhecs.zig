@@ -421,6 +421,22 @@ pub const World = struct {
         self.visit(terms, ctx, func, runArchetype);
     }
 
+    /// A `while (it.next()) |e|` iterator over every entity that has all of `terms`. Inside the
+    /// loop, `it.get(T)` returns a mutable pointer to that entity's `T`. This is the plain Zig way
+    /// to walk a query: no callback, no context to thread, just a loop that closes over its scope.
+    /// Same rule as `each`: do not change which components an entity has while iterating.
+    pub fn view(self: *World, comptime terms: anytype) View(terms) {
+        var v: View(terms) = .{ .world = self };
+        if (terms.len == 0) {
+            v.done = true;
+            return v;
+        }
+        inline for (terms, 0..) |T, i| {
+            if (self.lookupComponent(T)) |id| v.ids[i] = id else v.done = true;
+        }
+        return v;
+    }
+
     /// Number of live entities that have all of `terms`.
     pub fn count(self: *World, comptime terms: anytype) usize {
         const n = terms.len;
@@ -805,6 +821,11 @@ pub fn Query(comptime terms: anytype) type {
             return total;
         }
 
+        /// A `while (it.next()) |e|` iterator over this query, the same as `World.view`.
+        pub fn iterator(self: Self) View(terms) {
+            return .{ .world = self.world, .ids = self.ids };
+        }
+
         // The cached match list, refreshed if a table has appeared, or null if the refresh could
         // not allocate (the callers then fall back to a direct scan, which never allocates).
         fn matched(self: Self) ?[]const u32 {
@@ -833,6 +854,63 @@ pub fn Query(comptime terms: anytype) type {
             return total;
         }
     };
+}
+
+/// A plain Zig iterator over a query, from `World.view` or `Query.iterator`. Walk it with
+/// `while (it.next()) |e|`, and read the current entity's components with `it.get(T)`.
+pub fn View(comptime terms: anytype) type {
+    const n = terms.len;
+    return struct {
+        world: *World,
+        ids: [n]Id = undefined,
+        done: bool = false,
+        scan: usize = 0, // next archetype index to consider
+        arch: ?*Archetype = null,
+        cols: [n]usize = undefined,
+        row: usize = 0, // next row to return within `arch`
+        cur: usize = 0, // row the last next() returned, used by get()
+        const Self = @This();
+
+        /// The next matching entity, or null once the query is exhausted.
+        pub fn next(self: *Self) ?Entity {
+            if (self.done) return null;
+            while (true) {
+                if (self.arch) |a| {
+                    if (self.row < a.entities.items.len) {
+                        self.cur = self.row;
+                        self.row += 1;
+                        return a.entities.items[self.cur];
+                    }
+                }
+                // Advance to the next archetype that holds every term, skipping empty ones.
+                self.arch = null;
+                while (self.scan < self.world.archetypes.items.len) {
+                    const a = &self.world.archetypes.items[self.scan];
+                    self.scan += 1;
+                    if (archetypeMatches(a, self.ids)) {
+                        inline for (0..n) |i| self.cols[i] = a.columnIndex(self.ids[i]).?;
+                        self.arch = a;
+                        self.row = 0;
+                        break;
+                    }
+                }
+                if (self.arch == null) return null;
+            }
+        }
+
+        /// Mutable pointer to the current entity's `T`; `T` must be one of the query's terms.
+        pub fn get(self: *Self, comptime T: type) *T {
+            const i = comptime termIndex(terms, T);
+            return columnPtr(T, &self.arch.?.columns[self.cols[i]], self.cur);
+        }
+    };
+}
+
+fn termIndex(comptime terms: anytype, comptime T: type) comptime_int {
+    inline for (terms, 0..) |U, i| {
+        if (U == T) return i;
+    }
+    @compileError("component " ++ @typeName(T) ++ " is not one of the query's terms");
 }
 
 fn columnPtr(comptime T: type, col: *Column, row: usize) *T {

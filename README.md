@@ -69,7 +69,20 @@ if (world.has(e, Frozen)) { ... }
 
 ### Asking questions
 
-There are two ways to sweep the entities that match a set of components. The first hands your function one entity at a time, with a typed pointer for each term, in the order you asked for them.
+The plainest way to walk the entities that match a set of components is an iterator. `view` gives you one, and inside the loop `it.get(T)` hands back a pointer to the current entity's `T`. Nothing to thread through, just a loop that reads its own scope.
+
+```zig
+var it = world.view(.{ Position, Velocity });
+while (it.next()) |entity| {
+    const p = it.get(Position);
+    const v = it.get(Velocity);
+    p.x += v.x;
+    p.y += v.y;
+    _ = entity;
+}
+```
+
+If you prefer a callback, `each` hands your function one entity at a time with a typed pointer per term, along with a context value of your choosing.
 
 ```zig
 world.each(.{ Position, Velocity }, {}, struct {
@@ -81,7 +94,7 @@ world.each(.{ Position, Velocity }, {}, struct {
 }.run);
 ```
 
-The second hands your function whole column slices for each matching table at once, and leaves the inner loop to you. Because the loop body is yours and the slices are contiguous, the compiler is free to vectorize it. This is the fastest way to move over a large set.
+For the fastest sweep over a large set, `run` hands your function whole column slices for each matching table at once and leaves the inner loop to you. Because the loop body is yours and the slices are contiguous, the compiler is free to vectorize it.
 
 ```zig
 world.run(.{ Position, Velocity }, dt, struct {
@@ -122,6 +135,7 @@ If you run the same query many times, compile it once into a handle. The handle 
 const movers = try world.query(.{ Position, Velocity });
 // later, every frame
 movers.each(dt, moveFn);
+var it = movers.iterator(); // or walk it with a while loop, like world.view
 const n = movers.count();
 ```
 

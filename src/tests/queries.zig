@@ -84,6 +84,66 @@ test "tags work as zero-size components in queries" {
     try testing.expectEqual(@as(usize, 1), seen);
 }
 
+test "the view iterator walks the same set as each, and get() reaches the components" {
+    var w = try World.init(testing.allocator);
+    defer w.deinit();
+
+    var i: usize = 0;
+    while (i < 50) : (i += 1) {
+        const e = try w.entity();
+        try w.set(e, c.Position{ .x = @floatFromInt(i), .y = 0 });
+        if (i % 2 == 0) try w.set(e, c.Velocity{ .x = 2, .y = 0 });
+    }
+
+    // Drive the velocity'd ones with a plain Zig loop, no callback or context.
+    var moved: usize = 0;
+    var it = w.view(.{ c.Position, c.Velocity });
+    while (it.next()) |e| {
+        const p = it.get(c.Position);
+        const v = it.get(c.Velocity);
+        p.x += v.x;
+        moved += 1;
+        _ = e;
+    }
+    try testing.expectEqual(@as(usize, 25), moved); // the 25 even-indexed entities
+
+    // The loop saw the same set a count() sees, and the writes landed.
+    try testing.expectEqual(@as(usize, 25), w.count(.{ c.Position, c.Velocity }));
+    var summed: f64 = 0;
+    var p_it = w.view(.{c.Position});
+    while (p_it.next()) |_| summed += p_it.get(c.Position).x;
+    // even indices 0..48 each got +2; odd indices unchanged. Sum of 0..49 is 1225, plus 25*2.
+    try testing.expectEqual(@as(f64, 1225 + 50), summed);
+}
+
+test "an empty view iterates nothing" {
+    var w = try World.init(testing.allocator);
+    defer w.deinit();
+    const e = try w.entity();
+    try w.set(e, c.Position{ .x = 0, .y = 0 });
+
+    var it = w.view(.{c.Velocity}); // no entity has Velocity
+    try testing.expect(it.next() == null);
+}
+
+test "a query handle yields a matching iterator" {
+    var w = try World.init(testing.allocator);
+    defer w.deinit();
+    var i: usize = 0;
+    while (i < 8) : (i += 1) {
+        const e = try w.entity();
+        try w.set(e, c.Health{ .hp = 1 });
+    }
+    const q = try w.query(.{c.Health});
+    var seen: usize = 0;
+    var it = q.iterator();
+    while (it.next()) |_| {
+        it.get(c.Health).hp += 1;
+        seen += 1;
+    }
+    try testing.expectEqual(@as(usize, 8), seen);
+}
+
 test "nested each over different queries is safe" {
     var w = try World.init(testing.allocator);
     defer w.deinit();

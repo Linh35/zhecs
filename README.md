@@ -224,7 +224,14 @@ try world.set(player, sprite); // rl.Texture2D, a handle into the graphics drive
 
 A render pass is then a query, and a physics step is another. There is one thing to keep in mind. A component that owns a resource, a texture on the card or a buffer of audio, is held by its handle, and a table move copies that handle rather than the resource behind it. The world does not free it for you. When you remove such a component or delete its entity, unload the resource yourself, the same way you would if you held it in a plain struct. Component move and destroy hooks, which would automate this, are on the road ahead.
 
-There is a working example under `examples/raylib`. It is a small project of its own, depending on [raylib-zig](https://github.com/raylib-zig/raylib-zig) and on this library, so that the core stays free of dependencies. `zig build run` inside that folder opens a window of entities bouncing around, driven by a zhecs system, and `zig build test` runs the integration checks without a display. One thing the example shows in passing: a position and a velocity are both a `Vector2`, and since a component is identified by its type, give each its own one-field wrapper. Types that play a single role, a colour or a texture, go in as they are.
+There are working examples under `examples/`, each a small project of its own that depends on a real library and on this one, so the core stays free of dependencies. Every example has a `zig build test` that runs headless, which is what proves the integration in CI.
+
+- `examples/raylib` ([raylib-zig](https://github.com/raylib-zig/raylib-zig)): a bin of balls falling under gravity and bouncing, with raylib's `Vector2`, `Color`, `Texture2D`, and `Camera2D` as components. `zig build run` opens the window; the tests cover a multi-phase pipeline, a scene hierarchy through `ChildOf`, lifetimes reaped with deferred deletes, a reused render query, and the physics itself.
+- `examples/zbullet` ([zbullet](https://github.com/zig-gamedev/zbullet)): real Bullet physics. Each entity holds its rigid-body and shape handles, and a system syncs body transforms back into a position component. The tests drop spheres onto a floor and launch a body into an arc.
+- `examples/zgui` ([zgui](https://github.com/zig-gamedev/zgui)): a Dear ImGui entity inspector with no graphics backend. The tests build the UI from ECS state and assert on the draw data ImGui produces.
+- `examples/zsdl` ([zsdl](https://github.com/zig-gamedev/zsdl)): SDL's rectangle, point, and colour types as components, with ECS-driven axis-aligned collision. No SDL calls, so it links nothing and runs headless.
+
+One thing the raylib example shows in passing: a position and a velocity are both a `Vector2`, and since a component is identified by its type, give each its own one-field wrapper. Types that play a single role, a colour or a texture, go in as they are.
 
 ## What is not here yet
 
@@ -243,5 +250,8 @@ src/zhecs.zig      the library and its internal tests
 src/tests.zig      pulls in the public test suite
 src/tests/         the suite, one file per topic
 examples/basic.zig a walkthrough and a benchmark
-examples/raylib/   a windowed raylib demo, its own small project
+examples/raylib/   a windowed raylib physics demo, its own small project
+examples/zbullet/  a Bullet physics integration
+examples/zgui/     a Dear ImGui entity inspector
+examples/zsdl/     SDL types with ECS-driven collision
 ```

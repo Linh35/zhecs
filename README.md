@@ -230,6 +230,7 @@ There are working examples under `examples/`, each a small project of its own th
 - `examples/zbullet` ([zbullet](https://github.com/zig-gamedev/zbullet)): real Bullet physics. Each entity holds its rigid-body and shape handles, and a system syncs body transforms back into a position component. The tests drop spheres onto a floor and launch a body into an arc.
 - `examples/zgui` ([zgui](https://github.com/zig-gamedev/zgui)): a Dear ImGui entity inspector with no graphics backend. The tests build the UI from ECS state and assert on the draw data ImGui produces.
 - `examples/zsdl` ([zsdl](https://github.com/zig-gamedev/zsdl)): SDL's rectangle, point, and colour types as components, with ECS-driven axis-aligned collision. No SDL calls, so it links nothing and runs headless.
+- `examples/platformer` (raylib-zig): a small platformer. The player runs and jumps under gravity, collides with platforms by axis-separated AABB resolution, and dies on contact with a patrolling enemy. `zig build run` plays it; the tests cover the physics, jumping, wall collision, enemy death, and patrol turns, all headless.
 
 One thing the raylib example shows in passing: a position and a velocity are both a `Vector2`, and since a component is identified by its type, give each its own one-field wrapper. Types that play a single role, a colour or a texture, go in as they are.
 
@@ -254,4 +255,5 @@ examples/raylib/   a windowed raylib physics demo, its own small project
 examples/zbullet/  a Bullet physics integration
 examples/zgui/     a Dear ImGui entity inspector
 examples/zsdl/     SDL types with ECS-driven collision
+examples/platformer/ a playable platformer: physics, AABB, enemy death
 ```

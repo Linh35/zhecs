@@ -11,8 +11,8 @@ const zhecs = @import("zhecs");
 const World = zhecs.World;
 const Entity = zhecs.Entity;
 
-// The physics handles, stored on the entity. Bullet owns the memory behind them; we free it
-// ourselves on teardown, since a table move only copies the handle.
+// The physics handles, stored on the entity. Bullet owns the memory behind them; teardown frees it,
+// since a table move only copies the handle.
 const RigidBody = struct { body: zbt.Body, shape: zbt.Shape };
 // The body's world position, copied out of Bullet each step so ECS systems can read it cheaply.
 const Position = struct { v: [3]f32 };
@@ -38,7 +38,7 @@ test "spheres fall under gravity and settle on a static floor, synced into ECS p
     defer zbt.deinit();
 
     const world = zbt.initWorld();
-    defer world.deinit(); // asserts the world is empty, so we remove every body before here
+    defer world.deinit(); // asserts the world is empty, so every body is removed before this runs
     world.setGravity(&.{ 0, -10, 0 });
 
     // A static floor: a wide box centred at the origin with half-height 1, so its top is at y = 1.
@@ -65,7 +65,7 @@ test "spheres fall under gravity and settle on a static floor, synced into ECS p
         try w.set(e, Position{ .v = .{ 0, 0, 0 } });
     }
 
-    // Record the starting heights so we can prove the spheres actually fell.
+    // Record the starting heights to confirm the spheres actually fell.
     syncPositions(&w);
     var start_high: usize = 0;
     var ctx0 = .{ .n = &start_high };

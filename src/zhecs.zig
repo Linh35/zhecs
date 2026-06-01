@@ -12,7 +12,7 @@
 //! capacity, archetypes and maps only grow), so every persistent allocation comes from that arena
 //! and `deinit` is a single arena reset. The base allocator is used only for short-lived scratch.
 //! Lean on `initCapacity` and `reserve` to pre-size the tables, after which steady state allocates
-//! nothing. See the README for the design, semantics, and the roadmap of features not here yet.
+//! nothing.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -408,15 +408,16 @@ pub const World = struct {
     /// Run `func` for every entity that has all of `terms`, one entity at a time. `func` is called
     /// as `func(ctx, Entity, *T0, *T1, ...)`, with one mutable column pointer per term, in order.
     ///
-    /// Do not add or remove components, or delete entities, from inside `func` in this draft;
-    /// structural changes during iteration are not deferred yet and would move rows underneath you.
+    /// Adding or removing a component, or deleting an entity, from inside `func` moves rows under
+    /// the iterator. Open a defer scope (`beginDefer`/`endDefer`) around the call to make such
+    /// changes safe; they are recorded and applied when the scope closes.
     pub fn each(self: *World, comptime terms: anytype, ctx: anytype, comptime func: anytype) void {
         self.visit(terms, ctx, func, iterArchetype);
     }
 
     /// Like `each`, but `func` is called once per matching archetype with whole column slices:
     /// `func(ctx, []const Entity, []T0, []T1, ...)`. The loop body is yours, so the compiler can
-    /// vectorize it. This is the fastest way to sweep large sets. Same no-structural-change rule.
+    /// vectorize it. As with `each`, use a defer scope to change components safely while iterating.
     pub fn run(self: *World, comptime terms: anytype, ctx: anytype, comptime func: anytype) void {
         self.visit(terms, ctx, func, runArchetype);
     }
@@ -688,7 +689,7 @@ pub const World = struct {
     }
 
     fn sizeOfId(self: *World, id: Id) usize {
-        if (id & PAIR_FLAG != 0) return 0; // pairs are tags in this draft
+        if (id & PAIR_FLAG != 0) return 0; // a pair carries no data, so its column size is zero
         return self.component_meta.items[@intCast(id)].size;
     }
 

@@ -1,7 +1,7 @@
-//! zhecs using SDL's geometry and colour types as components, through zig-gamedev's zsdl. These
-//! tests do not open a window or call into SDL, so they link nothing and run headless: the point is
-//! that SDL's value types drop into the ECS and that systems over them behave correctly. The scene
-//! is a flock of rectangles that move, bounce off the field walls, and report axis-aligned overlaps.
+//! zhecs using SDL's geometry and colour types as components, through zig-gamedev's zsdl. The tests
+//! do not open a window or call into SDL, so they link nothing and run headless: SDL's value types
+//! serve as components and systems over them behave correctly. The scene is a flock of rectangles
+//! that move, bounce off the field walls, and report axis-aligned overlaps.
 
 const std = @import("std");
 const testing = std.testing;

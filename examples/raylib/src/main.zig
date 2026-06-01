@@ -5,7 +5,7 @@
 //! and go in as they are.
 //!
 //! `zig build run` opens the window. `zig build test` runs the headless suite in tests.zig, which
-//! needs no display and is what proves the integration in CI.
+//! needs no display.
 
 const std = @import("std");
 const rl = @import("raylib");

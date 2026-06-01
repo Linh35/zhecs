@@ -1,7 +1,7 @@
 //! zhecs feeding Dear ImGui through zig-gamedev's zgui, with no graphics backend. The tests build
-//! an entity inspector window each frame and ask ImGui to produce its draw data, then assert on
-//! that data. No window or GPU is opened, so they run under `zig build test` anywhere; the draw
-//! data is the proof that ECS state actually reached the UI.
+//! an entity inspector window each frame from ECS state, ask ImGui to produce its draw data, and
+//! assert on that data (its vertex counts track the entities). No window or GPU is opened, so they
+//! run under `zig build test` anywhere.
 
 const std = @import("std");
 const testing = std.testing;
@@ -14,11 +14,11 @@ const Health = struct { hp: i32 };
 const Name = struct { id: u32 };
 
 // Build one inspector frame listing every entity that has Health, and return the draw data ImGui
-// produced for it. Headless: no backend consumes the data, we only measure it.
+// produced for it. No backend consumes the data; the caller measures it.
 fn inspectorFrame(w: *World) zgui.DrawData {
-    zgui.io.setIniFilename(null); // headless: do not write an imgui.ini to disk
-    // Tell ImGui the (absent) renderer manages textures itself, so a headless frame needs no
-    // uploaded font atlas. This is the same flag zgui sets in its own no-backend tests.
+    zgui.io.setIniFilename(null); // do not write an imgui.ini to disk
+    // Tell ImGui the renderer manages textures itself, so a frame with no backend needs no
+    // uploaded font atlas.
     zgui.io.setBackendFlags(.{ .renderer_has_textures = true });
     zgui.io.setDisplaySize(1280, 720);
     zgui.io.setDeltaTime(1.0 / 60.0);

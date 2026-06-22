@@ -17,7 +17,6 @@ pub fn build(b: *std.Build) void {
             .root_source_file = b.path("examples/basic.zig"),
             .target = target,
             .optimize = optimize,
-            .link_libc = true, // the benchmark reads a monotonic clock via libc clock_gettime
             .imports = &.{.{ .name = "zhecs", .module = zhecs }},
         }),
     });

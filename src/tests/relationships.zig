@@ -55,7 +55,7 @@ test "ChildOf and parent, including a self relationship" {
     try testing.expect(w.parent(mom) == null);
 }
 
-test "a relationship to a deleted target reports the target as no longer alive" {
+test "a relationship to a deleted target is reported as gone (null)" {
     var w = try World.init(testing.allocator);
     defer w.deinit();
 
@@ -64,8 +64,9 @@ test "a relationship to a deleted target reports the target as no longer alive" 
     try w.addPair(e, c.Owns, target);
     w.delete(target);
 
-    const t = w.getTarget(e, c.Owns).?; // still recorded by index
-    try testing.expect(!w.isAlive(t)); // but the generation no longer matches
+    // getTarget rejects a deleted/recycled target (the stored pair generation no longer occupies
+    // the slot) and returns null, instead of handing back a stale index.
+    try testing.expect(w.getTarget(e, c.Owns) == null);
 }
 
 test "singletons: set, overwrite, and several distinct kinds" {

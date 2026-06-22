@@ -176,7 +176,7 @@ fn ms(ns: u64) f64 {
 }
 
 fn nowNs() u64 {
-    var ts: std.c.timespec = undefined;
-    _ = std.c.clock_gettime(.MONOTONIC, &ts);
-    return @as(u64, @intCast(ts.sec)) * std.time.ns_per_s + @as(u64, @intCast(ts.nsec));
+    // libc-free wall clock via Zig 0.16's std.Io, so the example needs no `-lc` (links anywhere).
+    const io = std.Io.Threaded.global_single_threaded.io();
+    return @intCast(std.Io.Clock.real.now(io).toNanoseconds());
 }

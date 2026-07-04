@@ -511,7 +511,8 @@ pub const World = struct {
     return self.getMut(e, T) orelse error.EntityNotAlive;
   }
 
-  /// Remove component `T` from `e`, if present. Fires on_remove.
+  /// Remove component `T` from `e`, if present. Fires on_remove while `T` is
+  /// still readable via `get`/`getMut`, before the row is actually dropped.
   pub fn remove(self: *World, e: Entity, comptime T: type) !void {
     self.assertMutableNow();
     const id = self.lookupComponent(T) orelse return;
@@ -1124,8 +1125,10 @@ pub const World = struct {
 
   fn applyRemove(self: *World, e: Entity, id: Id) !void {
     if (!self.hasId(e, id)) return;
-    try self.removeId(e, id);
+    // Fire while `e` still carries `id`, so observers can read the outgoing
+    // value via get/getMut; only then move the row to the reduced archetype.
     self.fireHook(id, e, .on_remove);
+    try self.removeId(e, id);
   }
 
   fn applyDelete(self: *World, e: Entity) void {

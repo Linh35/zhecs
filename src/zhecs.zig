@@ -199,6 +199,12 @@ inline fn makeEntity(index: u32, generation: u32) Entity {
   return @enumFromInt((@as(u64, generation) << 32) | index);
 }
 
+/// Encode a `(Relation, target)` pair id from a relation's dense component id and target entity.
+/// Centralized so the bit layout (PAIR_FLAG | rel<<32 | target_index) lives in exactly one place.
+inline fn pairIdOf(rel: Id, target: Entity) Id {
+  return PAIR_FLAG | (rel << 32) | entityIndex(target);
+}
+
 // --- type identity -------------------------------------------------------------------------------
 
 // Each distinct Zig type gets its own static byte; its address is a stable, unique key for the
@@ -580,7 +586,7 @@ pub const World = struct {
   pub fn hasPair(self: *World, e: Entity, comptime Relation: type, target: Entity) bool {
     const rel = self.lookupComponent(Relation) orelse return false;
     const rec = self.recordPtr(e) orelse return false;
-    const pid = PAIR_FLAG | (rel << 32) | entityIndex(target);
+    const pid = pairIdOf(rel, target);
     if (self.archetypes.items[rec.archetype].columnIndex(pid) == null) return false;
     // Reject a recycled slot: the stored gen must match the caller's handle.
     const stored = self.pair_gen.get(pid) orelse return true;
@@ -618,7 +624,7 @@ pub const World = struct {
   /// without a defer scope. Mirrors `each`'s callback shape minus the component pointers.
   pub fn eachChild(self: *World, the_parent: Entity, ctx: anytype, comptime func: anytype) void {
     const rel = self.lookupComponent(ChildOf) orelse return;
-    const pid = PAIR_FLAG | (rel << 32) | entityIndex(the_parent);
+    const pid = pairIdOf(rel, the_parent);
     // Reject a recycled parent: a new occupant must not inherit the old children.
     if (self.pair_gen.get(pid)) |stored| {
       if (stored != entityGen(the_parent)) return;
@@ -634,7 +640,7 @@ pub const World = struct {
   /// extras are dropped (returns `out.len`) - size `out` to your max fan-out, or use `eachChild`.
   pub fn getChildren(self: *World, the_parent: Entity, out: []Entity) usize {
     const rel = self.lookupComponent(ChildOf) orelse return 0;
-    const pid = PAIR_FLAG | (rel << 32) | entityIndex(the_parent);
+    const pid = pairIdOf(rel, the_parent);
     // Reject a recycled parent (see eachChild): the new occupant has no children.
     if (self.pair_gen.get(pid)) |stored| {
       if (stored != entityGen(the_parent)) return 0;
@@ -883,6 +889,15 @@ pub const World = struct {
 
   // --- systems / pipeline ----------------------------------------------------------------------
 
+  // --- systems / pipeline ----------------------------------------------------------------------
+
+  // Shared tail of `system`/`systemRun`/`systemParallel`: build the entry and append it. Keeps the
+  // SystemEntry shape (and any future fields) in one place; the per-kind trampoline is the only
+  // thing that differs between the three registrations.
+  fn registerSystem(self: *World, phase: Phase, name: []const u8, runner: *const fn (*World) void) !void {
+    try self.systems.append(self.mem(), .{ .phase = phase, .name = name, .run = runner });
+  }
+
   /// Register a system that runs in `phase`. `func` has the same shape as an `each` callback but
   /// with the world as its context: `func(*World, Entity, *T0, ...)`, so it can read
   /// `world.delta_time`. Systems run in registration order within a phase.
@@ -892,7 +907,7 @@ pub const World = struct {
         w.each(terms, w, func);
       }
     };
-    try self.systems.append(self.mem(), .{ .phase = phase, .name = name, .run = Trampoline.run });
+    try self.registerSystem(phase, name, Trampoline.run);
   }
 
   /// Set the threading backend used by `systemParallel` systems (typically `threaded.io()` from a
@@ -913,7 +928,7 @@ pub const World = struct {
         w.run(terms, w, func);
       }
     };
-    try self.systems.append(self.mem(), .{ .phase = phase, .name = name, .run = Trampoline.run });
+    try self.registerSystem(phase, name, Trampoline.run);
   }
 
   /// Register a **parallel column-pass** system: like `systemRun`, but the matched rows are sliced
@@ -934,7 +949,7 @@ pub const World = struct {
         }
       }
     };
-    try self.systems.append(self.mem(), .{ .phase = phase, .name = name, .run = Trampoline.run });
+    try self.registerSystem(phase, name, Trampoline.run);
   }
 
   /// Advance the world by `dt` seconds: run every system, phase by phase, in declaration order.
@@ -1381,7 +1396,7 @@ pub const World = struct {
 
   fn pairId(self: *World, comptime Relation: type, target: Entity) !Id {
     const rel = try self.componentId(Relation);
-    return PAIR_FLAG | (rel << 32) | entityIndex(target);
+    return pairIdOf(rel, target);
   }
 
   fn sizeOfId(self: *World, id: Id) usize {

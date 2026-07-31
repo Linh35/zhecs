@@ -10,6 +10,7 @@ comptime {
     _ = @import("tests/relationships.zig");
     _ = @import("tests/deferred.zig");
     _ = @import("tests/query_handle.zig");
+    _ = @import("tests/exclusion.zig");
     _ = @import("tests/spawn.zig");
     _ = @import("tests/interop.zig");
     _ = @import("tests/fuzz.zig");

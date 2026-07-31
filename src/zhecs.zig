@@ -46,6 +46,8 @@ pub const Options = struct {
 
 pub const PAIR_FLAG: u64 = 1 << 63;
 const RELATION_MASK: u64 = 0x7fff_ffff; // 31 bits of relation id, between the flag and the target
+const EXCLUDE_FLAG: u64 = 1 << 62; // term ids tagged with this are Without(T) exclusions
+const EXCLUDE_MASK: u64 = std.math.maxInt(u64) ^ EXCLUDE_FLAG; // strips the tag; bit 63 stays set
 
 /// Comptime-stable component ID + bitset query signatures.
 /// `ComptimeIds(.{Transform, Velocity, AI})` → comptime `id(T)`, `signatureOf(.{T0, T1})`,
@@ -89,6 +91,16 @@ pub fn SoaField(comptime T: type, comptime field: anytype) type {
   return struct {
     pub const _Component = T;
     pub const _Field = field;
+  };
+}
+
+/// Query exclusion marker: match entities that do NOT have `T`.
+/// `world.view(.{Transform, Collider, Without(Rigidbody)})` iterates every entity with Transform
+/// and Collider but no Rigidbody. The excluded component needs no registration up front; an
+/// unregistered exclusion simply matches everything (nothing can have it).
+pub fn Without(comptime T: type) type {
+  return struct {
+    pub const _Exclude = T;
   };
 }
 
@@ -716,7 +728,7 @@ pub const World = struct {
     }
     var ids: [n]Id = undefined;
     inline for (terms, 0..) |T, i| {
-      ids[i] = self.lookupComponent(T) orelse return;
+      ids[i] = resolveTermId(self, T) orelse return;
     }
     const step = if (chunk == 0) default_parallel_chunk else chunk;
     const Ctx = @TypeOf(ctx);
@@ -735,7 +747,8 @@ pub const World = struct {
         args[0] = c;
         args[1] = arch.entities.items[lo..hi];
         inline for (terms, 0..) |T, i| {
-          args[2 + i] = columnSlice(T, &arch.columns[cols[i]], total)[lo..hi];
+          if (comptime isExclusionTerm(T)) continue;
+          args[2 + requiredIndex(terms, i)] = columnSlice(T, &arch.columns[cols[i]], total)[lo..hi];
         }
         @call(.auto, func, args);
       }
@@ -744,7 +757,10 @@ pub const World = struct {
         const cnt = arch.entities.items.len;
         if (cnt == 0) return;
         var cols: [n]usize = undefined;
-        inline for (0..n) |i| cols[i] = arch.columnIndex(term_ids[i]).?;
+        inline for (terms, 0..) |T, i| {
+          if (comptime isExclusionTerm(T)) continue;
+          cols[i] = arch.columnIndex(term_ids[i]).?;
+        }
         // Treat `st` as a FLOOR but cap the task count: a huge archetype must not spawn
         // thousands of micro-tasks - that just burns dispatch overhead and can stall the
         // executor. Grow the chunk so at most `max_parallel_ranges` tasks are spawned here.
@@ -757,13 +773,13 @@ pub const World = struct {
       }
     };
 
-    if (self.matchedArchetypes(ids)) |matched| {
+    if (self.matchedArchetypes(terms, ids)) |matched| {
       for (matched) |ai| Job.dispatch(&group, io, &self.archetypes.items[ai], ids, step, ctx);
     } else |_| {
       var ai: usize = 0;
       while (ai < self.archetypes.items.len) : (ai += 1) {
         const arch = &self.archetypes.items[ai];
-        if (archetypeMatches(arch, ids)) Job.dispatch(&group, io, arch, ids, step, ctx);
+        if (archetypeMatches(arch, terms, ids)) Job.dispatch(&group, io, arch, ids, step, ctx);
       }
     }
     // Join: blocks until every chunk has finished. Cancellation is not expected for a column
@@ -795,7 +811,7 @@ pub const World = struct {
       return v;
     }
     inline for (terms, 0..) |T, i| {
-      if (self.lookupComponent(T)) |id| v.ids[i] = id else v.done = true;
+      if (resolveTermId(self, T)) |id| v.ids[i] = id else v.done = true;
     }
     return v;
   }
@@ -843,12 +859,12 @@ pub const World = struct {
     const n = terms.len;
     if (n == 0) return 0;
     var ids: [n]Id = undefined;
-    inline for (terms, 0..) |T, i| ids[i] = self.lookupComponent(T) orelse return 0;
+    inline for (terms, 0..) |T, i| ids[i] = resolveTermId(self, T) orelse return 0;
     var total: usize = 0;
-    const matched = self.matchedArchetypes(ids) catch {
+    const matched = self.matchedArchetypes(terms, ids) catch {
       var ai: usize = 0;
       while (ai < self.archetypes.items.len) : (ai += 1) {
-        if (archetypeMatches(&self.archetypes.items[ai], ids)) total += self.archetypes.items[ai].entities.items.len;
+        if (archetypeMatches(&self.archetypes.items[ai], terms, ids)) total += self.archetypes.items[ai].entities.items.len;
       }
       return total;
     };
@@ -863,14 +879,15 @@ pub const World = struct {
     if (n == 0) return;
     var ids: [n]Id = undefined;
     inline for (terms, 0..) |T, i| {
-      // A term never registered cannot be on any entity, so there is nothing to iterate.
-      ids[i] = self.lookupComponent(T) orelse return;
+      // A required term never registered cannot be on any entity, so there is nothing to iterate.
+      // An unregistered exclusion resolves to a never-match id: nothing has it, nothing is skipped.
+      ids[i] = resolveTermId(self, T) orelse return;
     }
-    const matched = self.matchedArchetypes(ids) catch {
+    const matched = self.matchedArchetypes(terms, ids) catch {
       var ai: usize = 0;
       while (ai < self.archetypes.items.len) : (ai += 1) {
         const arch = &self.archetypes.items[ai];
-        if (archetypeMatches(arch, ids)) visitor(self, arch, terms, ids, ctx, func);
+        if (archetypeMatches(arch, terms, ids)) visitor(self, arch, terms, ids, ctx, func);
       }
       return;
     };
@@ -883,7 +900,15 @@ pub const World = struct {
   pub fn query(self: *World, comptime terms: anytype) !Query(terms) {
     const n = terms.len;
     var ids: [n]Id = undefined;
-    inline for (terms, 0..) |T, i| ids[i] = try self.componentId(T);
+    inline for (terms, 0..) |T, i| {
+      // Required terms register so the handle stays valid for late-added components; exclusions
+      // resolve lazily (see Query.refreshIds) and stay a no-op until the type is registered.
+      if (comptime isExclusionTerm(T)) {
+        ids[i] = resolveTermId(self, T).?;
+      } else {
+        ids[i] = try self.componentId(T);
+      }
+    }
     return .{ .world = self, .ids = ids, .cache = try self.resolveQuery(ids) };
   }
 
@@ -1363,9 +1388,9 @@ pub const World = struct {
   // with an unchanged archetype version this does not allocate: it sorts the tiny term array on
   // the stack to form the key and looks it up. A held `Query` skips even this by keeping the cache
   // pointer from `resolveQuery` and calling `ensureFresh` directly.
-  fn matchedArchetypes(self: *World, term_ids: anytype) ![]const u32 {
+  fn matchedArchetypes(self: *World, comptime terms: anytype, term_ids: anytype) ![]const u32 {
     const qc = try self.resolveQuery(term_ids);
-    try self.ensureFresh(qc, term_ids);
+    try self.ensureFresh(qc, comptime terms, term_ids);
     return qc.matched.items;
   }
 
@@ -1384,12 +1409,12 @@ pub const World = struct {
   }
 
   // Rebuild a cache's match list only if a new archetype has appeared since it was last built.
-  fn ensureFresh(self: *World, qc: *QueryCache, term_ids: anytype) !void {
+  fn ensureFresh(self: *World, qc: *QueryCache, comptime terms: anytype, term_ids: anytype) !void {
     if (qc.version == self.archetype_version) return;
     qc.matched.clearRetainingCapacity();
     var ai: u32 = 0;
     while (ai < self.archetypes.items.len) : (ai += 1) {
-      if (archetypeMatches(&self.archetypes.items[ai], term_ids)) try qc.matched.append(self.mem(), ai);
+      if (archetypeMatches(&self.archetypes.items[ai], comptime terms, term_ids)) try qc.matched.append(self.mem(), ai);
     }
     qc.version = self.archetype_version;
   }
@@ -1518,31 +1543,51 @@ pub fn Query(comptime terms: anytype) type {
     cache: *QueryCache,
     const Self = @This();
 
+    // Exclusion ids are lazy (they need no registration); re-resolve them on every use so a type
+    // registered after the handle was created is still filtered correctly.
+    fn refreshIds(self: *Self) void {
+      inline for (terms, 0..) |T, i| {
+        if (comptime isExclusionTerm(T)) {
+          if (self.world.lookupComponent(excludedComponent(T))) |id| self.ids[i] = id | EXCLUDE_FLAG;
+        }
+      }
+    }
+
     pub fn each(self: Self, ctx: anytype, comptime func: anytype) void {
-      self.sweep(ctx, func, iterArchetype);
+      var q = self;
+      q.refreshIds();
+      q.sweep(ctx, func, iterArchetype);
     }
 
     pub fn run(self: Self, ctx: anytype, comptime func: anytype) void {
-      self.sweep(ctx, func, runArchetype);
+      var q = self;
+      q.refreshIds();
+      q.sweep(ctx, func, runArchetype);
     }
 
     pub fn count(self: Self) usize {
-      const list = self.matched() orelse return self.scanCount();
+      var q = self;
+      q.refreshIds();
+      const list = q.matched() orelse return q.scanCount();
       var total: usize = 0;
-      for (list) |ai| total += self.world.archetypes.items[ai].entities.items.len;
+      for (list) |ai| total += q.world.archetypes.items[ai].entities.items.len;
       return total;
     }
 
     /// A `while (it.next()) |e|` iterator over this query, the same as `World.view`.
     pub fn iterator(self: Self) View(terms) {
-      return .{ .world = self.world, .ids = self.ids, .start_arch_version = self.world.archetype_version, .start_structural_version = self.world.structural_version };
+      var q = self;
+      q.refreshIds();
+      return .{ .world = q.world, .ids = q.ids, .start_arch_version = q.world.archetype_version, .start_structural_version = q.world.structural_version };
     }
 
     // The cached match list, refreshed if a table has appeared, or null if the refresh could
     // not allocate (the callers then fall back to a direct scan, which never allocates).
     fn matched(self: Self) ?[]const u32 {
-      self.world.ensureFresh(self.cache, self.ids) catch return null;
-      return self.cache.matched.items;
+      var q = self;
+      q.refreshIds();
+      q.world.ensureFresh(q.cache, terms, q.ids) catch return null;
+      return q.cache.matched.items;
     }
 
     inline fn sweep(self: Self, ctx: anytype, comptime func: anytype, comptime visitor: anytype) void {
@@ -1552,7 +1597,7 @@ pub fn Query(comptime terms: anytype) type {
         var ai: usize = 0;
         while (ai < self.world.archetypes.items.len) : (ai += 1) {
           const arch = &self.world.archetypes.items[ai];
-          if (archetypeMatches(arch, self.ids)) visitor(self.world, arch, terms, self.ids, ctx, func);
+          if (archetypeMatches(arch, terms, self.ids)) visitor(self.world, arch, terms, self.ids, ctx, func);
         }
       }
     }
@@ -1561,7 +1606,7 @@ pub fn Query(comptime terms: anytype) type {
       var total: usize = 0;
       var ai: usize = 0;
       while (ai < self.world.archetypes.items.len) : (ai += 1) {
-        if (archetypeMatches(&self.world.archetypes.items[ai], self.ids)) total += self.world.archetypes.items[ai].entities.items.len;
+        if (archetypeMatches(&self.world.archetypes.items[ai], terms, self.ids)) total += self.world.archetypes.items[ai].entities.items.len;
       }
       return total;
     }
@@ -1614,8 +1659,11 @@ pub fn View(comptime terms: anytype) type {
         while (self.scan < self.world.archetypes.items.len) {
           const a = &self.world.archetypes.items[self.scan];
           self.scan += 1;
-          if (archetypeMatches(a, self.ids)) {
-            inline for (0..n) |i| self.cols[i] = a.columnIndex(self.ids[i]).?;
+          if (archetypeMatches(a, terms, self.ids)) {
+            inline for (terms, 0..) |T, i| {
+              if (comptime isExclusionTerm(T)) continue;
+              self.cols[i] = a.columnIndex(self.ids[i]).?;
+            }
             self.arch = a;
             self.row = 0;
             break;
@@ -1655,10 +1703,54 @@ fn columnSlice(comptime T: type, col: *Column, len: usize) []T {
   return p[0..len];
 }
 
-// Does this archetype hold every one of the given component ids?
-fn archetypeMatches(arch: *const Archetype, term_ids: anytype) bool {
-  inline for (0..term_ids.len) |i| {
-    if (arch.columnIndex(term_ids[i]) == null) return false;
+// Is this a `Without(T)` exclusion term rather than a required component?
+fn isExclusionTerm(comptime T: type) bool {
+  const ti = @typeInfo(T);
+  if (ti != .@"struct") return false;
+  for (ti.@"struct".decls) |d| {
+    if (std.mem.eql(u8, d.name, "_Exclude")) return true;
+  }
+  return false;
+}
+
+fn excludedComponent(comptime T: type) type {
+  return @field(T, "_Exclude");
+}
+
+// An id no archetype signature can contain: bit 63 set (pair-like) with a huge body, so the
+// sorted binary search in columnIndex can never find it. Unregistered exclusions resolve here.
+fn neverMatchId() Id {
+  return EXCLUDE_MASK;
+}
+
+// Resolve one query term to its component id. Exclusions tag the id with EXCLUDE_FLAG so cache
+// keys and the matcher can tell them apart; a required term that was never registered is null.
+fn resolveTermId(self: *World, comptime T: type) ?Id {
+  if (comptime isExclusionTerm(T)) {
+    if (self.lookupComponent(excludedComponent(T))) |id| return id | EXCLUDE_FLAG;
+    return neverMatchId();
+  }
+  return self.lookupComponent(T);
+}
+
+// Callback-arg slot for term `i` once exclusion terms are compacted out of the args tuple.
+fn requiredIndex(comptime terms: anytype, comptime i: usize) comptime_int {
+  var k: comptime_int = 0;
+  inline for (terms, 0..) |T, j| {
+    if (comptime isExclusionTerm(T)) continue;
+    if (j < i) k += 1;
+  }
+  return k;
+}
+
+// Does this archetype hold every required id and none of the excluded ones?
+fn archetypeMatches(arch: *const Archetype, comptime terms: anytype, term_ids: anytype) bool {
+  inline for (terms, 0..) |T, i| {
+    if (comptime isExclusionTerm(T)) {
+      if (arch.columnIndex(term_ids[i] & EXCLUDE_MASK) != null) return false;
+    } else {
+      if (arch.columnIndex(term_ids[i]) == null) return false;
+    }
   }
   return true;
 }
@@ -1670,7 +1762,10 @@ inline fn iterArchetype(world: *World, arch: *Archetype, comptime terms: anytype
   const cnt = arch.entities.items.len;
   if (cnt == 0) return;
   var cols: [n]usize = undefined;
-  inline for (0..n) |i| cols[i] = arch.columnIndex(term_ids[i]).?;
+  inline for (terms, 0..) |T, i| {
+    if (comptime isExclusionTerm(T)) continue;
+    cols[i] = arch.columnIndex(term_ids[i]).?;
+  }
 
   const start_sv = world.structural_version;
   var row: usize = 0;
@@ -1679,7 +1774,8 @@ inline fn iterArchetype(world: *World, arch: *Archetype, comptime terms: anytype
     args[0] = ctx;
     args[1] = arch.entities.items[row];
     inline for (terms, 0..) |T, i| {
-      args[2 + i] = columnPtr(T, &arch.columns[cols[i]], row);
+      if (comptime isExclusionTerm(T)) continue;
+      args[2 + requiredIndex(terms, i)] = columnPtr(T, &arch.columns[cols[i]], row);
     }
     @call(.auto, func, args);
     // Structural mutation in the callback moved rows; panic before the next read.
@@ -1697,8 +1793,9 @@ inline fn runArchetype(world: *World, arch: *Archetype, comptime terms: anytype,
   args[0] = ctx;
   args[1] = arch.entities.items[0..cnt];
   inline for (terms, 0..) |T, i| {
+    if (comptime isExclusionTerm(T)) continue;
     const ci = arch.columnIndex(term_ids[i]).?;
-    args[2 + i] = columnSlice(T, &arch.columns[ci], cnt);
+    args[2 + requiredIndex(terms, i)] = columnSlice(T, &arch.columns[ci], cnt);
   }
   @call(.auto, func, args);
   // A structural change inside func invalidates its slices; flag the misuse.

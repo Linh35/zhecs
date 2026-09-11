@@ -1126,6 +1126,23 @@ pub const World = struct {
     }
   }
 
+  /// `reserve` for a signature only known at runtime, e.g. read back from a baked budget.
+  pub fn reserveIds(self: *World, ids: []const Id, n: usize) !void {
+    var buf: [max_reserve_ids]Id = undefined;
+    if (ids.len > buf.len) return error.SignatureTooLong;
+    const sig = buf[0..ids.len];
+    @memcpy(sig, ids);
+    std.mem.sort(Id, sig, {}, std.sort.asc(Id));
+    const ai = try self.getOrCreateArchetype(sig);
+    const arch = &self.archetypes.items[ai];
+    try arch.entities.ensureTotalCapacity(self.mem(), n);
+    for (arch.columns) |*c| {
+      if (c.size > 0) try c.data.ensureTotalCapacity(self.mem(), n * c.size);
+    }
+  }
+
+  const max_reserve_ids = 64;
+
   // --- internals -------------------------------------------------------------------------------
 
   fn recordPtr(self: *World, e: Entity) ?*Record {
@@ -1209,6 +1226,11 @@ pub const World = struct {
     }
     self.cmd_list.clearRetainingCapacity();
     self.cmd_data.clearRetainingCapacity();
+  }
+
+  /// Assign `T` its runtime id without touching any entity or archetype.
+  pub fn register(self: *World, comptime T: type) !Id {
+    return self.componentId(T);
   }
 
   fn componentId(self: *World, comptime T: type) !Id {
